@@ -24,6 +24,55 @@ Identity mismatch: this repo is set up as alice-work, but
   - origin: pushes with alice's SSH key (via host 'github.com')
 ```
 
+## Quick start (new to git?)
+
+This tool warns you before you save (commit) or upload (push) work as the wrong
+GitHub account. You only need it if you have two or more GitHub accounts.
+
+**Before you start**, you need:
+
+- a Mac or Linux computer (on Windows, use WSL)
+- git installed
+- an SSH key for each GitHub account, added to that account on GitHub
+  ([GitHub's guide](https://docs.github.com/en/authentication/connecting-to-github-with-ssh))
+- on a Mac only: run `brew install bash` once
+
+**1. Install it.** Open the Terminal and paste:
+
+```bash
+git clone https://github.com/Frestina/git-whoami.git ~/.local/share/git-whoami
+~/.local/share/git-whoami/install.sh
+```
+
+**2. Tell it about your accounts.** Open the hidden file `~/.gitconfig` in your
+home folder and add one block per account. Replace the name, email and key path
+with your own:
+
+```ini
+[identity]
+	active = alice
+
+[identity "alice"]
+	email = alice@example.com
+	sshkey = ~/.ssh/alice-github.pub
+```
+
+**3. Say which folder belongs to which account**, for example "everything in
+`~/work` uses my work account". Copy the files in [`examples/`](examples/) and
+change them to match your setup. [Set up your identities](#set-up-your-identities)
+explains each file.
+
+**4. Check it.** Go into one of your project folders and run:
+
+```bash
+git whoami
+```
+
+It shows which account the project uses, and anything that doesn't match.
+
+That's it. From now on, git stops you if you commit or push with the wrong
+account, and tells you what to fix.
+
 ## Requirements
 
 - git 2.13 or newer (for `includeIf`)
