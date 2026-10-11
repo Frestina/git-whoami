@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+# git-whoami: which GitHub identity this repo uses, and whether everything agrees.
+#
+# Identities live in git config. The subsection name is the GitHub username:
+#
+#   [identity]
+#     active = alice                       # overridden per directory by includeIf
+#   [identity "alice"]
+#     email = alice@example.com            # any number of email lines
+#     sshkey = ~/.ssh/alice-github.pub
+#
+# Three things must match the active identity: the commit author/committer
+# email, the SSH key each GitHub remote pushes with, and the remote's owner
+# (when the owner is one of your own identities).
+#
+# Usage:
+#   git whoami                      report, explaining where each value comes from
+#   git whoami --check [--quiet]    exit 1 on a mismatch (the pre-commit hook)
+#   git whoami --pre-push REMOTE URL
+#                                   check that remote and the commits being pushed,
+#                                   read from stdin as git passes them (pre-push hook)
+set -u
+
+die() { echo "git-whoami: $*" >&2; exit 2; }
+
+[ "${BASH_VERSINFO[0]}" -ge 4 ] || die "needs bash 4 or newer (this is $BASH_VERSION)"
+
+git rev-parse --git-dir >/dev/null 2>&1 || die "not in a git repository"
+
+mode=report quiet=0 push_remote="" push_url=""
+while [ $# -gt 0 ]; do
+	case $1 in
+		--check) mode=check ;;
+		--quiet) quiet=1 ;;
+		--pre-push) mode=pre-push; push_remote=${2-}; push_url=${3-}; shift 2 ;;
+		-h|--help) sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$0"; exit 0 ;;
+		*) die "unknown argument: $1" ;;
+	esac
+	shift
+done
+
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+expand() { printf '%s' "${1/#\~/$HOME}"; }
+
+mapfile -t identities < <(git config --name-only --get-regexp '^identity\..+\.sshkey$' |
+	sed 's/^identity\.//; s/\.sshkey$//')
+active=$(git config identity.active) || active=""
+
+problems=()   # block commits/pushes
+notes=()      # informational only
+
+identity_for_email() {
+	local want id e
+	want=$(lower "$1")
+	for id in "${identities[@]}"; do
+		while IFS= read -r e; do
+			[ "$(lower "$e")" = "$want" ] && { echo "$id"; return; }
+		done < <(git config --get-all "identity.$id.email")
+	done
+}
+
+identity_for_name() {
+	local id
+	for id in "${identities[@]}"; do
+		[ "$(lower "$id")" = "$(lower "$1")" ] && { echo "$id"; return; }
+	done
+}
+
+# Sets url_scheme, url_host and url_owner.
+parse_url() {
+	local url=$1 rest
+	url_scheme="" url_host="" url_owner=""
+	case $url in
+		*://*)
+			url_scheme=${url%%://*}
+			rest=${url#*://}
+			url_host=${rest%%/*}; url_host=${url_host#*@}; url_host=${url_host%%:*}
+			url_owner=${rest#*/} ;;
+		*:*)
+			case ${url%%:*} in */*) url_scheme=file; return ;; esac
+			url_scheme=ssh
+			url_host=${url%%:*}; url_host=${url_host#*@}
+			url_owner=${url#*:} ;;
+		*) url_scheme=file; return ;;
+	esac
+	url_owner=${url_owner#/}; url_owner=${url_owner%%/*}
+	case $url_scheme in git+ssh|ssh+git) url_scheme=ssh ;; esac
+}
+
+# Prints "<real hostname> <identity or empty>" for an ssh host alias.
+ssh_identity() {
+	local hostname="" files=() line id f key
+	while read -r k v; do
+		case $k in
+			hostname) hostname=$v ;;
+			identityfile) files+=("$(expand "$v")") ;;
+		esac
+	done < <(ssh -G "$1" 2>/dev/null)
+	for f in "${files[@]}"; do
+		for id in "${identities[@]}"; do
+			key=$(expand "$(git config "identity.$id.sshkey")")
+			[ "$f" = "$key" ] || [ "$f.pub" = "$key" ] || [ "$f" = "$key.pub" ] || continue
+			echo "$hostname $id"; return
+		done
+	done
+	echo "$hostname "
+}
+
+# Checks one remote URL, appending to problems/notes. Sets line to a summary.
+check_remote() {
+	local name=$1 url=$2 host key_id="" owner_id="" summary=()
+	parse_url "$url"
+	case $url_scheme in
+		ssh)
+			read -r host key_id < <(ssh_identity "$url_host")
+			[ "$(lower "$host")" = github.com ] || { line="not GitHub, skipped"; return; }
+			if [ -z "$key_id" ]; then
+				problems+=("$name: $url_host uses an SSH key that isn't any identity's sshkey")
+				summary+=("key unknown")
+			elif [ "$key_id" != "$active" ]; then
+				problems+=("$name: pushes with $key_id's SSH key (via host '$url_host')")
+				summary+=("key $key_id ✗")
+			else
+				summary+=("key $key_id")
+			fi ;;
+		http|https)
+			[ "$(lower "$url_host")" = github.com ] || { line="not GitHub, skipped"; return; }
+			notes+=("$name: HTTPS remote, so the credential helper (not this check) picks the account")
+			summary+=("https, key not checked") ;;
+		*) line="local path, skipped"; return ;;
+	esac
+	owner_id=$(identity_for_name "$url_owner")
+	if [ -n "$owner_id" ] && [ "$owner_id" != "$active" ]; then
+		problems+=("$name: repo belongs to $owner_id")
+		summary+=("owner $url_owner ✗")
+	else
+		summary+=("owner $url_owner")
+	fi
+	printf -v line '%s, ' "${summary[@]}"
+	line=${line%, }
+}
+
+# Checks the author or committer email. Sets line to a summary.
+check_ident() {
+	local which=$1 ident email id
+	ident=$(git var "GIT_${which}_IDENT" 2>/dev/null) || {
+		problems+=("no ${which,,} identity configured")
+		line="(none)"; return
+	}
+	ident=${ident% * *}
+	email=${ident##*<}; email=${email%>}
+	id=$(identity_for_email "$email")
+	if [ -z "$id" ]; then
+		notes+=("${which,,} email $email isn't listed under any identity")
+		line="$ident  (unknown email)"
+	elif [ "$id" != "$active" ]; then
+		problems+=("${which,,} email $email belongs to $id")
+		line="$ident  ✗ $id"
+	else
+		line=$ident
+	fi
+}
+
+where() {
+	git config --show-origin "$1" 2>/dev/null | cut -f1 | sed "s|^file:||; s|^$HOME|~|"
+}
+
+if [ ${#identities[@]} -eq 0 ] || [ -z "$active" ]; then
+	[ $mode = report ] && echo "No identities configured (need identity.active and [identity \"<name>\"] sections)."
+	exit 0
+fi
+
+check_ident AUTHOR; author=$line
+check_ident COMMITTER; committer=$line
+
+declare -A remote_lines=()
+if [ $mode = pre-push ]; then
+	check_remote "$push_remote" "$push_url"; remote_lines[$push_remote]=$line
+	while read -r _ local_sha _ _; do
+		# An all-zero sha is a branch deletion: nothing to check.
+		[ -n "${local_sha:-}" ] && [ -n "${local_sha//0/}" ] || continue
+		while read -r sha ae ce; do
+			[ "$ce" = "$ae" ] && ce=""
+			for e in "$ae" $ce; do
+				id=$(identity_for_email "$e")
+				[ -n "$id" ] && [ "$id" != "$active" ] &&
+					problems+=("commit ${sha:0:9} has $e ($id)")
+			done
+		done < <(git log --format='%H %ae %ce' "$local_sha" --not --remotes 2>/dev/null)
+	done
+else
+	while read -r r; do
+		check_remote "$r" "$(git remote get-url --push "$r")"; remote_lines[$r]=$line
+	done < <(git remote)
+fi
+
+if [ $mode = report ]; then
+	printf '%-10s %s  (from %s)\n' identity "$active" "$(where identity.active)"
+	printf '%-10s %s\n' author "$author"
+	[ "$committer" != "$author" ] && printf '%-10s %s\n' committer "$committer"
+	for r in "${!remote_lines[@]}"; do
+		printf '%-10s %s  %s\n' "$r" "$(git remote get-url --push "$r")" "${remote_lines[$r]}"
+	done
+fi
+
+if [ $quiet = 0 ]; then
+	for n in "${notes[@]}"; do echo "note: $n" >&2; done
+	if [ ${#problems[@]} -gt 0 ]; then
+		echo >&2
+		echo "Identity mismatch: this repo is set up as $active, but" >&2
+		for p in "${problems[@]}"; do echo "  - $p" >&2; done
+		echo >&2
+		echo "identity.active comes from $(where identity.active)." >&2
+		echo "If this repo belongs to another identity, move it under that identity's" >&2
+		echo "directory, or set it for this repo only:" >&2
+		echo "  git config identity.active <name>" >&2
+		echo "  git config user.name <name> && git config user.email <email>" >&2
+		[ $mode != report ] && echo "To bypass once: --no-verify" >&2
+	fi
+fi
+
+[ ${#problems[@]} -eq 0 ]

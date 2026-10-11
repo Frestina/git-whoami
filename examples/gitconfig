@@ -1,0 +1,32 @@
+# Example ~/.gitconfig for two GitHub accounts: "alice" (personal) and
+# "alice-work". Copy the parts you need and replace names, emails and keys.
+
+[user]
+	name = Alice Example
+	email = 1234+alice@users.noreply.github.com
+
+# Every identity is an [identity "<github-username>"] section.
+[identity "alice"]
+	# Every email you commit with as this identity. Commits whose author or
+	# committer email belongs to a *different* identity are blocked.
+	email = alice@example.com
+	email = 1234+alice@users.noreply.github.com
+	# The public key of the SSH key this account pushes with.
+	sshkey = ~/.ssh/alice-github.pub
+
+[identity "alice-work"]
+	email = alice@work.example
+	sshkey = ~/.ssh/alice-work-github.pub
+
+# The identity used everywhere by default...
+[identity]
+	active = alice
+
+# ...and the one used for every repo under ~/work/. The included file must come
+# after the defaults above so its values win.
+[includeIf "gitdir:~/work/"]
+	path = ~/.gitconfig-work
+
+# install.sh sets this for you.
+[core]
+	hooksPath = ~/.config/git/hooks

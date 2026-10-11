@@ -1,0 +1,19 @@
+# Example ~/.ssh/config for two GitHub accounts.
+#
+# GitHub picks the account from the SSH key, so each account needs its own key
+# and its own host alias. git-whoami resolves the alias with `ssh -G` and checks
+# that its IdentityFile is the active identity's sshkey.
+
+# Personal: git@github.com:alice/repo.git
+Host github.com
+	HostName github.com
+	User git
+	IdentityFile ~/.ssh/alice-github
+	IdentitiesOnly yes
+
+# Work: clone as git@github-work:acme/repo.git
+Host github-work
+	HostName github.com
+	User git
+	IdentityFile ~/.ssh/alice-work-github
+	IdentitiesOnly yes

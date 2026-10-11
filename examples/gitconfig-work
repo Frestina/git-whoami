@@ -1,0 +1,8 @@
+# Example ~/.gitconfig-work, included for repos under ~/work/ (see gitconfig).
+# Switch the identity and the commit email together.
+
+[identity]
+	active = alice-work
+
+[user]
+	email = alice@work.example
