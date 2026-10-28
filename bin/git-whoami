@@ -77,11 +77,11 @@ parse_url() {
 			url_host=${rest%%/*}; url_host=${url_host#*@}; url_host=${url_host%%:*}
 			url_owner=${rest#*/} ;;
 		*:*)
-			case ${url%%:*} in */*) url_scheme=file; return ;; esac
+			case ${url%%:*} in */*) url_scheme="file"; return ;; esac
 			url_scheme=ssh
 			url_host=${url%%:*}; url_host=${url_host#*@}
 			url_owner=${url#*:} ;;
-		*) url_scheme=file; return ;;
+		*) url_scheme="file"; return ;;
 	esac
 	url_owner=${url_owner#/}; url_owner=${url_owner%%/*}
 	case $url_scheme in git+ssh|ssh+git) url_scheme=ssh ;; esac
