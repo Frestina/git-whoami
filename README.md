@@ -75,7 +75,7 @@ account, and tells you what to fix.
 
 ## Requirements
 
-- git 2.13 or newer (for `includeIf`)
+- git 2.13 or newer (for `includeIf`), or 2.31 for `git leakguard`
 - bash 4 or newer. Linux already has it. macOS ships bash 3.2, so run
   `brew install bash` and make sure Homebrew's `bin` comes first on your `PATH`.
 - OpenSSH, if you push over SSH
@@ -90,13 +90,14 @@ git clone https://github.com/Frestina/git-whoami.git ~/.local/share/git-whoami
 The installer symlinks files from the clone, so keep the clone where it is.
 Running `git pull` in it updates the tool. It:
 
-1. links `~/.local/bin/git-whoami` to `bin/git-whoami`. Set `BIN_DIR` to
-   choose another directory, which must be on your `PATH`.
+1. links `~/.local/bin/git-whoami` and `git-leakguard` to `bin/`. Set `BIN_DIR`
+   to choose another directory, which must be on your `PATH`.
 2. links `~/.config/git/hooks` to `hooks/`
 3. sets `git config --global core.hooksPath ~/.config/git/hooks`, unless you
    already have a hooks path. In that case it tells you how to switch.
 
-Nothing is checked until you add identities, so installing it is harmless.
+Nothing is checked until you add identities or leak terms, so installing it is
+harmless.
 
 ## Set up your identities
 
@@ -191,6 +192,59 @@ git whoami -h                    show this usage
 To skip the hooks for one commit or push, use `git commit --no-verify` or
 `git push --no-verify`.
 
+## Leak guard
+
+`git leakguard` is the second check on every push. It blocks a push that would
+publish something you listed as private, such as a machine name, a home address
+or a second account you keep separate.
+
+The list goes in `~/.gitconfig`, next to your identities, so it is never in a
+repo that could be pushed. Keep your dotfiles private if they hold this file.
+
+```ini
+[leak]
+	term = my-laptop                     # literal, any case, anywhere in a line
+	term = /home/alice/
+	regex = "ghp_[a-z0-9]{36}"           # awk regex, in lowercase: lines are lowercased first
+	private = alice/notes                # owner/repo, pushes to it aren't checked
+
+[leak "alice-work"]
+	term = alice-personal                # only while alice-work is the active identity
+```
+
+Quote a value that holds `#`, `;` or a backslash.
+
+A push is checked for added lines, the names of new files, author and committer
+names and emails, commit and tag messages, and ref names. Terms also search
+binary files. Regexes don't, because a short one matches random bytes.
+
+Commits already on a public remote aren't checked again, so pushing a fork
+doesn't re-check its upstream's history. A commit that is only on a private
+remote or a local one still counts when you push it somewhere public.
+
+Only pushes to github.com are checked, and every repo counts as public unless
+`leak.private` names it. A private repo you forgot to list gets blocked rather
+than skipped.
+
+```
+git leakguard                    check the whole history of this repo
+git leakguard --pre-push REMOTE URL
+                                 check the commits being pushed
+                                 (what the pre-push hook runs; reads git's stdin)
+```
+
+Run `git leakguard` before you make a private repo public. Changing a repo's
+visibility involves no push, so no hook sees it. This scan also covers repos
+listed in `leak.private`.
+
+What it can't catch:
+
+- **Commits made on github.com.** A merge in the web UI or an edit there never
+  passes through your hooks. It can carry your email if you haven't turned on
+  GitHub's email privacy setting.
+- **Text inside images,** and anything compressed or encoded.
+- **Anything not on your list.** It finds your terms, not secrets in general.
+
 ## How it works
 
 Every file in `hooks/` except `dispatch` is a symlink to `hooks/dispatch`.
@@ -200,6 +254,7 @@ hook. It:
 - runs `git whoami --check` for `pre-commit`
 - runs `git whoami --pre-push` for `pre-push`. This checks the remote, plus the
   author and committer of every commit that isn't on any remote yet.
+- runs `git leakguard --pre-push` for `pre-push`
 - then runs the repo's own `.git/hooks/<name>` if there is one. A global
   `core.hooksPath` would otherwise stop those hooks from running.
 

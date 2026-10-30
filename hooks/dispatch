@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Global git hooks (core.hooksPath in ~/.gitconfig). Each hook name here is a
-# symlink to this script. It runs the identity guard where it applies, then the
-# repo's own .git/hooks/<name>, which a global core.hooksPath would otherwise hide.
+# symlink to this script. It runs the identity and leak guards where they apply,
+# then the repo's own .git/hooks/<name>, which a global core.hooksPath would
+# otherwise hide.
 hook=$(basename "$0")
 # git-whoami from the same checkout as this script, else whatever is on PATH.
 self=$(readlink -f "$0" 2>/dev/null) || self=$0
@@ -12,6 +13,12 @@ whoami="$(dirname "$self")/../bin/git-whoami"
 	esac
 	whoami=true
 }
+leakguard="$(dirname "$self")/../bin/git-leakguard"
+[ -x "$leakguard" ] || leakguard=$(command -v git-leakguard) || {
+	[ "$hook" = pre-push ] &&
+		echo "$hook: git-leakguard not found, so the leak check is skipped" >&2
+	leakguard=true
+}
 stdin=""
 
 case $hook in
@@ -19,7 +26,8 @@ case $hook in
 		"$whoami" --check || exit 1 ;;
 	pre-push)
 		stdin=$(cat)
-		printf '%s\n' "$stdin" | "$whoami" --pre-push "$1" "$2" || exit 1 ;;
+		printf '%s\n' "$stdin" | "$whoami" --pre-push "$1" "$2" || exit 1
+		printf '%s\n' "$stdin" | "$leakguard" --pre-push "$1" "$2" || exit 1 ;;
 esac
 
 repo_hook="$(git rev-parse --git-common-dir)/hooks/$hook"

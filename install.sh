@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Install git-whoami and its global hooks by symlinking them from this checkout:
 #   $BIN_DIR/git-whoami        -> bin/git-whoami   (BIN_DIR defaults to ~/.local/bin)
+#   $BIN_DIR/git-leakguard     -> bin/git-leakguard
 #   ~/.config/git/hooks        -> hooks/           (honours $XDG_CONFIG_HOME)
 # and pointing the global core.hooksPath at that hooks directory, if it is unset.
 #
@@ -35,12 +36,13 @@ unlink_ours() {
 
 if [ "${1-}" = --uninstall ]; then
 	unlink_ours "$bin_dir/git-whoami"
+	unlink_ours "$bin_dir/git-leakguard"
 	unlink_ours "$hooks_dir"
 	if [ -n "$current_hooks_path" ] && [ "$(expand "$current_hooks_path")" = "$hooks_dir" ]; then
 		git config --global --unset-all core.hooksPath
 		echo "unset   core.hooksPath"
 	fi
-	echo "Your [identity] sections in ~/.gitconfig were left in place."
+	echo "Your [identity] and [leak] sections in ~/.gitconfig were left in place."
 	exit 0
 fi
 [ $# -eq 0 ] || { echo "usage: $0 [--uninstall]" >&2; exit 2; }
@@ -51,6 +53,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
 fi
 
 link "$here/bin/git-whoami" "$bin_dir/git-whoami"
+link "$here/bin/git-leakguard" "$bin_dir/git-leakguard"
 link "$here/hooks" "$hooks_dir"
 
 if [ -z "$current_hooks_path" ]; then

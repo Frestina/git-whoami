@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# Tests for git-leakguard. Builds throwaway repos; touches nothing else.
+set -u
+root=$(cd "$(dirname "$0")/.." && pwd)
+guard=$root/bin/git-leakguard
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+export GIT_CONFIG_GLOBAL=$tmp/gitconfig GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=alice GIT_AUTHOR_EMAIL=alice@example.com
+export GIT_COMMITTER_NAME=alice GIT_COMMITTER_EMAIL=alice@example.com
+cat >"$GIT_CONFIG_GLOBAL" <<'EOF'
+[init]
+	defaultBranch = main
+[identity]
+	active = alice
+[leak]
+	term = Secret-Host
+	regex = "tok_[a-z0-9]{8}"
+	private = alice/notes
+[leak "alice"]
+	term = other-account
+[leak "bob"]
+	term = alice-only-word
+EOF
+
+public=git@github.com:alice/site.git
+clean=0 blocked=1 error=2
+pass=0 fail=0
+
+expect() { # <name> <exit code> <command...>
+	local name=$1 want=$2 got=0
+	shift 2
+	"$@" >/dev/null 2>&1 || got=$?
+	if [ "$got" -eq "$want" ]; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1))
+		echo "FAIL: $name: exit $got, wanted $want"
+	fi
+}
+
+fresh() {
+	rm -rf "$tmp/repo"
+	git init -q "$tmp/repo"
+	cd "$tmp/repo" || exit 1
+	echo hello >README
+	git add README
+	git commit -qm first
+	git remote add origin "$public"
+	git update-ref refs/remotes/origin/main HEAD
+}
+
+commit_file() { # <file> <line>
+	printf '%s\n' "$2" >>"$1"
+	git add "$1"
+	git commit -qm "change $1"
+}
+
+update() { # <object> <remote ref>
+	printf 'refs/local %s %s %040d\n' "$(git rev-parse "$1")" "$2" 0
+}
+
+push() { # [url]
+	update HEAD refs/heads/main | "$guard" --pre-push origin "${1:-$public}"
+}
+
+push_ref() { # <object> <remote ref>
+	update "$1" "$2" | "$guard" --pre-push origin "$public"
+}
+
+push_hook() {
+	update HEAD refs/heads/main | "$root/hooks/pre-push" origin "$public"
+}
+
+fresh; commit_file a.txt 'nothing to see'
+expect "clean commit" $clean push
+
+fresh; commit_file a.txt 'ssh SECRET-host now'
+expect "term in an added line, any case" $blocked push
+
+fresh; commit_file a.txt 'key tok_ab12cd34 here'
+expect "regex" $blocked push
+
+fresh; commit_file a.txt 'key TOK_AB12CD34 here'
+expect "regex against the lowercased line" $blocked push
+
+fresh; commit_file a.txt 'said other-account here'
+expect "term for the active identity" $blocked push
+
+fresh; commit_file a.txt 'said alice-only-word here'
+expect "term for another identity" $clean push
+
+fresh; commit_file a.txt secret-host
+git update-ref refs/remotes/origin/main HEAD
+git rm -q a.txt; git commit -qm remove
+expect "removing a leak" $clean push
+
+fresh; : >secret-host.txt; git add .; git commit -qm 'empty file'
+expect "new empty file's name" $blocked push
+
+fresh; git commit -q --allow-empty -m 'fixes secret-host'
+expect "commit message" $blocked push
+
+fresh; GIT_AUTHOR_EMAIL=me@secret-host.example git commit -q --allow-empty -m x
+expect "author email" $blocked push
+
+fresh; GIT_COMMITTER_EMAIL=me@secret-host.example git commit -q --allow-empty -m x
+expect "committer email" $blocked push
+
+fresh; printf 'a\0secret-host\0b\n' >blob.bin; git add .; git commit -qm binary
+expect "binary file" $blocked push
+
+fresh; printf 'a\0tok_ab12cd34\0b\n' >blob.bin; git add .; git commit -qm binary
+expect "regex skips a binary file" $clean push
+
+fresh; git checkout -qb side; commit_file side.txt ok; git checkout -q main
+commit_file main.txt ok
+git merge -q --no-commit side >/dev/null; echo secret-host >>side.txt; git add side.txt
+git commit -qm merge
+expect "line added in a merge commit" $blocked push
+
+fresh; commit_file a.txt secret-host
+git update-ref refs/remotes/origin/main HEAD
+commit_file b.txt fine
+expect "commit already on this remote" $clean push
+
+fresh; commit_file a.txt secret-host
+git update-ref refs/remotes/upstream/main HEAD
+git remote add upstream https://github.com/someone/site.git
+expect "commit already on a public upstream" $clean push
+
+fresh; commit_file a.txt secret-host
+git update-ref refs/remotes/mirror/main HEAD
+git remote add mirror git@github.com:alice/notes.git
+expect "commit only on a private remote" $blocked push
+
+fresh; commit_file a.txt secret-host
+git update-ref refs/remotes/backup/main HEAD
+git remote add backup /srv/git/site.git
+expect "commit only on a local remote" $blocked push
+
+fresh; git update-ref -d refs/remotes/origin/main
+git commit -q --amend -m 'first, from secret-host'
+expect "first push reaches the root commit" $blocked push
+
+fresh; commit_file a.txt secret-host
+expect "private repo" $clean push git@github.com:alice/notes.git
+expect "private repo, any case" $clean push https://github.com/ALICE/Notes.git/
+expect "another repo of that owner" $blocked push git@github.com:alice/notes2.git
+expect "https public repo" $blocked push https://github.com/alice/site
+expect "not GitHub" $clean push git@gitlab.example:alice/site.git
+expect "local path" $clean push /srv/git/site.git
+expect "file url" $clean push file:///srv/git/site.git
+
+fresh; commit_file a.txt fine
+expect "ref name" $blocked push_ref HEAD refs/heads/secret-host
+
+fresh; git tag -a v1 -m 'built on secret-host'
+expect "tag message" $blocked push_ref v1 refs/tags/v1
+
+fresh; commit_file a.txt secret-host
+expect "branch deletion" $clean \
+	bash -c "printf '(delete) %040d refs/heads/old %040d\n' 0 1 | '$guard' --pre-push origin $public"
+
+fresh; commit_file a.txt secret-host
+git update-ref refs/remotes/origin/main HEAD
+expect "history scan sees what's already pushed" $blocked "$guard"
+
+fresh; commit_file a.txt fine
+expect "clean history scan" $clean "$guard"
+
+fresh; commit_file a.txt fine
+git config --add leak.regex '(unclosed'
+expect "a broken regex blocks the push" $error push
+git config --unset-all leak.regex
+
+fresh; commit_file a.txt fine
+expect "the pre-push hook passes a clean push" $clean push_hook
+
+fresh; commit_file a.txt secret-host
+expect "the pre-push hook runs the guard" $blocked push_hook
+
+: >"$GIT_CONFIG_GLOBAL"
+expect "no terms configured" $clean push
+
+echo "$pass passed, $fail failed"
+[ "$fail" -eq 0 ]

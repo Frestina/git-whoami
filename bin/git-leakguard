@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# git-leakguard: stop a push that would publish something private.
+#
+# The list lives in git config next to your identities, so it is never in a
+# repo that could be pushed:
+#
+#   [leak]
+#     term = my-laptop                     # literal, any case, anywhere in a line
+#     regex = "ghp_[a-z0-9]{36}"           # awk regex, matched against the
+#                                          # lowercased line: write it in lowercase
+#     private = alice/notes                # owner/repo, pushes to it aren't checked
+#   [leak "alice-work"]
+#     term = alice-personal                # only while alice-work is active
+#
+# A push is checked for added lines, new file names, author and committer names
+# and emails, commit and tag messages, and ref names. Terms also search binary
+# files; regexes don't, because a short one matches random bytes. Only pushes to
+# github.com are checked, and every repo counts as public unless leak.private
+# names it. Commits already on a public remote aren't checked again.
+#
+# Usage:
+#   git leakguard                   check the whole history of this repo, including
+#                                   a repo listed as private (run before going public)
+#   git leakguard --pre-push REMOTE URL
+#                                   check the commits being pushed, read from stdin
+#                                   as git passes them (pre-push hook)
+set -u
+
+die() { echo "git-leakguard: $*" >&2; exit 2; }
+
+[ "${BASH_VERSINFO[0]}" -ge 4 ] || die "needs bash 4 or newer (this is $BASH_VERSION)"
+
+git rev-parse --git-dir >/dev/null 2>&1 || die "not in a git repository"
+
+mode=all push_url=""
+while [ $# -gt 0 ]; do
+	case $1 in
+		--pre-push) mode=pre-push; push_url=${3-}; shift 2 ;;
+		-h|--help) sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$0"; exit 0 ;;
+		*) die "unknown argument: $1" ;;
+	esac
+	shift
+done
+
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# One rule per line: "t <term>" or "r <regex>".
+active=$(git config identity.active) || active=""
+rules=$(
+	for section in leak ${active:+"leak.$active"}; do
+		git config --get-all "$section.term" | sed 's/^/t /'
+		git config --get-all "$section.regex" | sed 's/^/r /'
+	done
+)
+
+if [ -z "$rules" ]; then
+	[ $mode = all ] && echo "No leak terms configured (need leak.term in git config)."
+	exit 0
+fi
+
+# Sets url_host, or leaves it empty for a local path.
+parse_host() {
+	local url=$1
+	url_host=""
+	case $url in
+		*://*) url_host=${url#*://}; url_host=${url_host%%/*}; url_host=${url_host#*@}; url_host=${url_host%%:*} ;;
+		*:*) case ${url%%:*} in */*) ;; *) url_host=${url%%:*}; url_host=${url_host#*@} ;; esac ;;
+	esac
+}
+
+# True when URL is a GitHub repo that isn't listed as private.
+checked_remote() {
+	local url=$1 real slug rest p
+	parse_host "$url"
+	[ -n "$url_host" ] || return 1
+	real=$(ssh -G "$url_host" 2>/dev/null </dev/null | awk '$1 == "hostname" { print $2 }')
+	[ "$(lower "${real:-$url_host}")" = github.com ] || return 1
+	slug=${url%/}; slug=${slug%.git}
+	rest=${slug%/*}
+	slug="${rest##*[:/]}/${slug##*/}"
+	while IFS= read -r p; do
+		[ "$(lower "$p")" = "$(lower "$slug")" ] && return 1
+	done < <(git config --get-all leak.private)
+	return 0
+}
+
+# Prints commits in the form the scanner reads.
+commits() {
+	git log --format='@@@commit %H%n%an <%ae>%n%cn <%ce>%n%B%n@@@diff' \
+		--patch --unified=0 --text --no-renames --no-ext-diff --no-textconv \
+		--no-color --src-prefix=a/ --dst-prefix=b/ --diff-merges=first-parent \
+		"$@" || exit 3
+}
+
+# An annotated tag's own text is not part of any commit.
+tag_object() {
+	[ "$(git cat-file -t "$1")" = tag ] || return 0
+	printf '@@@commit %s\n' "$1"
+	git cat-file -p "$1" || exit 3
+}
+
+# A commit on a public remote is out already, such as the history of a fork's
+# upstream. One that is only on a private remote still counts.
+public_remotes() {
+	local r
+	while read -r r; do
+		checked_remote "$(git remote get-url --push "$r")" && printf '%s\n' "--remotes=$r"
+	done < <(git remote)
+}
+
+stream() {
+	local local_sha remote_ref remote_sha obj range public
+	if [ $mode = all ]; then
+		git for-each-ref --format='@@@ref %(refname)' refs/heads refs/tags
+		while read -r obj; do
+			tag_object "$obj"
+		done < <(git for-each-ref --format='%(objectname)' refs/tags)
+		commits --branches --tags --remotes
+		return
+	fi
+	mapfile -t public < <(public_remotes)
+	while read -r _ local_sha remote_ref remote_sha; do
+		# An all-zero sha is a branch deletion: nothing to check.
+		[ -n "${local_sha:-}" ] && [ -n "${local_sha//0/}" ] || continue
+		printf '@@@ref %s\n' "$remote_ref"
+		tag_object "$local_sha"
+		range=("$local_sha" --not "${public[@]}")
+		[ -n "${remote_sha//0/}" ] && git cat-file -e "$remote_sha" 2>/dev/null &&
+			range+=("$remote_sha")
+		commits "${range[@]}"
+	done
+}
+
+if [ $mode = pre-push ]; then
+	checked_remote "$push_url" || { cat >/dev/null; exit 0; }
+fi
+
+# shellcheck disable=SC2016
+scan='
+BEGIN { nul = sprintf("%c", 0) }
+FNR == NR {
+	n++
+	kind[n] = substr($0, 1, 1)
+	pat[n] = substr($0, 3)
+	if (kind[n] == "t") pat[n] = tolower(pat[n])
+	next
+}
+function check(line, where,    i, lc, hit) {
+	lc = tolower(line)
+	for (i = 1; i <= n; i++) {
+		if (kind[i] == "r" && binary) continue
+		hit = kind[i] == "t" ? index(lc, pat[i]) : lc ~ pat[i]
+		if (!hit || (where SUBSEP pat[i]) in seen) continue
+		seen[where, pat[i]] = 1
+		if (++found <= 20) printf "  %s %s: %s\n", commit, where, pat[i]
+	}
+}
+/^@@@ref / { commit = "ref"; state = "meta"; check(substr($0, 8), "name"); next }
+/^@@@commit / { commit = substr($2, 1, 9); state = "meta"; binary = 0; next }
+/^@@@diff$/ { state = "diff"; file = ""; next }
+state == "meta" { check($0, "message or author"); next }
+/^diff --git / { len = (length($0) - 16) / 2; file = substr($0, length($0) - len + 1); binary = 0; next }
+/^new file mode/ { check(file, file); next }
+/^\+/ {
+	if (index($0, nul)) binary = 1
+	check(substr($0, 2), file)
+}
+END {
+	if (found > 20) printf "  ...and %d more\n", found - 20
+	exit found > 0
+}'
+
+report=$(
+	stream | LC_ALL=C awk "$scan" <(printf '%s\n' "$rules") -
+	statuses=("${PIPESTATUS[@]}")
+	[ "${statuses[0]}" -eq 0 ] || exit 3
+	exit "${statuses[1]}"
+)
+case $? in
+	0) [ $mode = all ] && echo "No leaks found."; exit 0 ;;
+	1) ;;
+	3) die "could not read the commits" ;;
+	*) die "scan failed; check leak.regex in your git config" ;;
+esac
+
+if [ $mode = all ]; then
+	echo "Found in this repo's history:"
+	printf '%s\n' "$report"
+	exit 1
+fi
+
+{
+	echo
+	echo "Leak: this push would publish something on your private list${active:+ (as $active)}:"
+	printf '%s\n' "$report"
+	echo
+	echo "Take it out of those commits (amend or rebase), then push again."
+	echo "If this repo is private, list it:"
+	echo "  git config --global --add leak.private <owner>/<repo>"
+	echo "To bypass once: --no-verify"
+} >&2
+exit 1
