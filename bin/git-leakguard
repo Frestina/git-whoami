@@ -16,8 +16,8 @@
 # and emails, commit and tag messages, and ref names. Terms also search binary
 # files; regexes don't, because a short one matches random bytes. Only pushes to
 # github.com are checked, and every repo counts as public unless leak.private
-# names it. Commits already on the remote being pushed to, or on one that can be
-# read without logging in, aren't checked again.
+# names it. Commits GitHub already shows to anyone, in the repo being pushed to or
+# in another of your GitHub remotes, aren't checked again.
 #
 # Usage:
 #   git leakguard                   check the whole history of this repo, including
@@ -37,10 +37,10 @@ fi
 
 git rev-parse --git-dir >/dev/null 2>&1 || die "not in a git repository"
 
-mode=all push_remote="" push_url=""
+mode=all push_url=""
 while [ $# -gt 0 ]; do
 	case $1 in
-		--pre-push) mode=pre-push; push_remote=${2-}; push_url=${3-}; shift 2 ;;
+		--pre-push) mode=pre-push; push_url=${3-}; shift 2 ;;
 		-h|--help) sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$0"; exit 0 ;;
 		*) die "unknown argument: $1" ;;
 	esac
@@ -48,6 +48,9 @@ while [ $# -gt 0 ]; do
 done
 
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# A push sends the real objects, so that's what to read.
+export GIT_NO_REPLACE_OBJECTS=1
 
 # Starts the scanner's marker lines, so that no commit message can imitate one.
 mark=@@@$RANDOM$RANDOM
@@ -86,7 +89,7 @@ checked_remote() {
 		*) real=$(ssh -G "$url_host" 2>/dev/null </dev/null | awk '$1 == "hostname" { print $2 }') ;;
 	esac
 	case $(lower "${real:-$url_host}") in
-		github.com|ssh.github.com) ;;
+		github.com|ssh.github.com|www.github.com) ;;
 		*) return 1 ;;
 	esac
 	url_slug=${url%/}; url_slug=${url_slug%.git}
@@ -98,18 +101,19 @@ checked_remote() {
 	return 0
 }
 
-# True when anyone can read url_slug. This leaves your config and credentials
-# behind: a url.insteadOf rule or a login would make a private repo look public.
-# No answer in time counts as private, so a stuck network can't hold up a push.
-readable_anonymously() {
+# Prints the branches and tags anyone can read in the repo <owner/repo>. This
+# leaves your config and credentials behind: a url.insteadOf rule or a login would
+# make a private repo look public. No answer in time counts as private, so a stuck
+# network can't hold up a push.
+public_refs() {
 	local asker timer status
 	(
 		cd / || exit 1
-		unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+		unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT XDG_CONFIG_HOME
 		HOME=/nonexistent GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
 			GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
-			exec git ls-remote "https://github.com/$url_slug.git" HEAD
-	) >/dev/null 2>&1 </dev/null &
+			exec git ls-remote --heads --tags "https://github.com/$1.git"
+	) 2>/dev/null </dev/null &
 	asker=$!
 	{ sleep "${GIT_LEAKGUARD_TIMEOUT:-10}"; kill "$asker"; } >/dev/null 2>&1 </dev/null &
 	timer=$!
@@ -122,7 +126,7 @@ readable_anonymously() {
 # Prints commits in the form the scanner reads.
 commits() {
 	git -c core.quotePath=false log --format="${mark}commit %H%n%an <%ae>%n%cn <%ce>%n%B%n${mark}diff" \
-		--patch --root --unified=0 --text --no-renames --no-ext-diff --no-textconv \
+		--patch --root --unified=0 --text --no-renames --no-ext-diff --no-textconv --no-relative \
 		--no-color --src-prefix=a/ --dst-prefix=b/ --diff-merges=first-parent \
 		"$@" || exit 3
 }
@@ -150,21 +154,24 @@ tag_object() {
 		tree)
 			while read -r _ kind obj path; do
 				[ "$kind" = blob ] && tag_blob "$obj" "$path"
-			done < <(git -c core.quotePath=false ls-tree -r "$obj") ;;
+			done < <(git -c core.quotePath=false ls-tree -r --full-tree "$obj") ;;
 	esac
 }
 
-# A commit on the remote being pushed to, or on a public one, is out already,
-# such as the history of a fork's upstream. One that is only on a private remote
-# still counts. Tracking refs come from the fetch URL, so that's the one to judge.
-public_remotes() {
-	local r
-	while read -r r; do
-		if [ "$r" = "$push_remote" ] ||
-			{ checked_remote "$(git remote get-url "$r")" && readable_anonymously; }; then
-			printf '%s\n' "--remotes=$r"
-		fi
-	done < <(git remote)
+# A commit GitHub shows to anyone is out already, such as the history of a fork's
+# upstream. Tracking refs can't tell: they may come from a URL the remote no longer
+# uses, so only what GitHub lists right now counts. A commit that is only on a
+# private remote still gets checked.
+public_commits() {
+	local r slug
+	{
+		checked_remote "$push_url" && printf '%s\n' "$url_slug"
+		while read -r r; do
+			checked_remote "$(git remote get-url "$r")" && printf '%s\n' "$url_slug"
+		done < <(git remote)
+	} | sort -fu | while read -r slug; do public_refs "$slug"; done |
+		cut -f1 | sort -u | git cat-file --batch-check='%(objecttype) %(objectname)' |
+		awk '$1 == "commit" { print $2 }'
 }
 
 stream() {
@@ -174,19 +181,20 @@ stream() {
 		while read -r obj; do
 			tag_object "$obj"
 		done < <(git for-each-ref --format='%(objectname)' refs/tags)
-		commits --branches --tags --remotes
+		commits --branches --tags --remotes --glob=refs/notes
 		return
 	fi
-	mapfile -t public < <(public_remotes)
+	mapfile -t public < <(public_commits)
 	while read -r _ local_sha remote_ref remote_sha; do
 		# An all-zero sha is a branch deletion: nothing to check.
 		[ -n "${local_sha:-}" ] && [ -n "${local_sha//0/}" ] || continue
 		printf '%sref %s\n' "$mark" "$remote_ref"
 		tag_object "$local_sha"
-		range=("$local_sha" --not "${public[@]}")
+		git rev-parse -q --verify "$local_sha^{commit}" >/dev/null || continue
+		range=("$local_sha" "${public[@]/#/^}")
 		[ -n "${remote_sha//0/}" ] && git cat-file -e "$remote_sha" 2>/dev/null &&
-			range+=("$remote_sha")
-		commits "${range[@]}"
+			range+=("^$remote_sha")
+		commits --stdin < <(printf '%s\n' "${range[@]}")
 	done
 }
 
@@ -255,6 +263,8 @@ END {
 report=$(
 	stream | LC_ALL=C "$awk" -v mark="$mark" "$scan" <(printf '%s\n' "$rules") -
 	statuses=("${PIPESTATUS[@]}")
+	# A scanner that died also breaks the stream, so ask it first.
+	[ "${statuses[1]}" -le 1 ] || exit "${statuses[1]}"
 	[ "${statuses[0]}" -eq 0 ] || exit 3
 	exit "${statuses[1]}"
 )

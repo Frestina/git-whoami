@@ -130,7 +130,7 @@ check_remote() {
 		ssh)
 			read -r host key_id < <(ssh_identity "$url_host")
 			case $(lower "$host") in
-				github.com|ssh.github.com) ;;
+				github.com|ssh.github.com|www.github.com) ;;
 				*) line="not GitHub, skipped"; return ;;
 			esac
 			if [ -z "$key_id" ]; then
@@ -143,7 +143,10 @@ check_remote() {
 				summary+=("key $key_id")
 			fi ;;
 		http|https)
-			[ "$(lower "$url_host")" = github.com ] || { line="not GitHub, skipped"; return; }
+			case $(lower "$url_host") in
+				github.com|www.github.com) ;;
+				*) line="not GitHub, skipped"; return ;;
+			esac
 			notes+=("$name: HTTPS remote, so the credential helper (not this check) picks the account")
 			summary+=("https, key not checked") ;;
 		*) line="local path, skipped"; return ;;
@@ -202,6 +205,7 @@ if [ $mode = pre-push ]; then
 		while read -r sha ae ce; do
 			[ "$ce" = "$ae" ] && ce=""
 			for e in "$ae" $ce; do
+				[ -n "$e" ] || continue
 				[ -n "${email_ids[$e]+set}" ] || email_ids[$e]=$(identity_for_email "$e")
 				id=${email_ids[$e]}
 				[ -n "$id" ] && [ "$id" != "$active" ] &&
