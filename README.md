@@ -83,7 +83,8 @@ account, and tells you what to fix.
 - OpenSSH, if you push over SSH
 - For `git leakguard`, an awk that handles `{n}` in regexes and NUL bytes. gawk
   does, and it's used if it's installed. The awk on Ubuntu 24.04 does too. The
-  mawk on Ubuntu 22.04 doesn't, so install gawk there or pushes are blocked.
+  awk on macOS and the mawk on Ubuntu 22.04 don't, so install gawk there
+  (`brew install gawk` on macOS) or pushes are blocked.
 
 ## Install
 

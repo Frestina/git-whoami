@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - if: runner.os == 'macOS'
-        run: brew install bash
+        run: brew install bash gawk
       - if: runner.os == 'Linux'
         run: shellcheck --severity=warning bin/git-whoami bin/git-leakguard hooks/dispatch install.sh tests/run
       - run: tests/run

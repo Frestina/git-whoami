@@ -49,7 +49,7 @@ fi
 
 if ((BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] < 404)); then
 	echo "install: warning: git-whoami needs bash 4.4+, but this shell is $BASH_VERSION." >&2
-	echo "         On macOS: brew install bash (it must come first on your PATH)." >&2
+	echo "         On macOS: brew install bash gawk (bash must come first on your PATH)." >&2
 fi
 
 link "$here/bin/git-whoami" "$bin_dir/git-whoami"
