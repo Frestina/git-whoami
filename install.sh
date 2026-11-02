@@ -15,29 +15,36 @@ hooks_dir=${XDG_CONFIG_HOME:-$HOME/.config}/git/hooks
 expand() { printf '%s' "${1/#\~/$HOME}"; }
 current_hooks_path=$(git config --global core.hooksPath || true)
 
-link() {
-	local src=$1 dst=$2
+check_free() {
+	local dst=$1
 	if [ -e "$dst" ] && { [ ! -L "$dst" ] || [[ $(readlink "$dst") != "$here"/* ]]; }; then
 		echo "install: $dst exists and doesn't link into this checkout; move it aside first" >&2
 		exit 1
 	fi
+}
+
+link() {
+	local src=$1 dst=$2
 	mkdir -p "$(dirname "$dst")"
 	ln -sfn "$src" "$dst"
 	echo "linked  $dst -> $src"
 }
 
-unlink_ours() {
-	local dst=$1
-	if [ -L "$dst" ] && [[ $(readlink "$dst") == "$here"/* ]]; then
+unlink_ours() { # <link> <path it has inside a checkout>
+	local dst=$1 name=$2 target
+	[ -L "$dst" ] || return 0
+	target=$(readlink "$dst")
+	# A dangling link counts too, for when the clone moved first.
+	if [[ $target == "$here"/* ]] || { [ ! -e "$dst" ] && [[ $target == */"$name" ]]; }; then
 		rm "$dst"
 		echo "removed $dst"
 	fi
 }
 
 if [ "${1-}" = --uninstall ]; then
-	unlink_ours "$bin_dir/git-whoami"
-	unlink_ours "$bin_dir/git-leakguard"
-	unlink_ours "$hooks_dir"
+	unlink_ours "$bin_dir/git-whoami" bin/git-whoami
+	unlink_ours "$bin_dir/git-leakguard" bin/git-leakguard
+	unlink_ours "$hooks_dir" hooks
 	if [ -n "$current_hooks_path" ] && [ "$(expand "$current_hooks_path")" = "$hooks_dir" ]; then
 		git config --global --unset-all core.hooksPath
 		echo "unset   core.hooksPath"
@@ -52,6 +59,9 @@ if ((BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] < 404)); then
 	echo "         On macOS: brew install bash gawk (bash must come first on your PATH)." >&2
 fi
 
+check_free "$bin_dir/git-whoami"
+check_free "$bin_dir/git-leakguard"
+check_free "$hooks_dir"
 link "$here/bin/git-whoami" "$bin_dir/git-whoami"
 link "$here/bin/git-leakguard" "$bin_dir/git-leakguard"
 link "$here/hooks" "$hooks_dir"

@@ -13,10 +13,11 @@ export GIT_AUTHOR_NAME=alice GIT_AUTHOR_EMAIL=alice@example.com
 export GIT_COMMITTER_NAME=alice GIT_COMMITTER_EMAIL=alice@example.com
 
 # Stand-ins, so results don't depend on this machine's ~/.ssh/config or the
-# network. Only someone/* is public, unless the guard's own git can still see a
-# URL rewrite or a login, which is how a private repo would pass for public.
+# network. The git one answers ls-remote from $STUB_GITHUB, and shows a private
+# repo only if the guard's own git can still see a URL rewrite or a login, which
+# is how a private repo would pass for public.
 REAL_GIT=$(command -v git)
-export REAL_GIT
+export REAL_GIT STUB_GITHUB=$tmp/github
 mkdir "$tmp/stubs"
 cat >"$tmp/stubs/ssh" <<'STUB'
 #!/usr/bin/env bash
@@ -26,8 +27,13 @@ cat >"$tmp/stubs/git" <<'STUB'
 #!/usr/bin/env bash
 [ "${1-}" = ls-remote ] || exec "$REAL_GIT" "$@"
 [ -z "${STUB_HANG-}" ] || exec sleep 30
-"$REAL_GIT" config --get-regexp '^(url|credential)\.' >/dev/null 2>&1 && exit 0
-case $2 in https://github.com/someone/*) exit 0 ;; *) exit 128 ;; esac
+url=${!#}; slug=${url#https://github.com/}; slug=${slug%.git}
+if "$REAL_GIT" config --get-regexp '^(url|credential)\.' >/dev/null 2>&1 &&
+	[ -f "$STUB_GITHUB/private/$slug" ]; then
+	exec cat "$STUB_GITHUB/private/$slug"
+fi
+[ -f "$STUB_GITHUB/public/$slug" ] && exec cat "$STUB_GITHUB/public/$slug"
+exit 128
 STUB
 chmod +x "$tmp/stubs/ssh" "$tmp/stubs/git"
 export PATH=$tmp/stubs:$PATH
@@ -63,16 +69,26 @@ expect() { # <name> <exit code> <command...>
 	fi
 }
 
+on_github() { # <public|private> <owner/repo>: main there is now HEAD
+	mkdir -p "$STUB_GITHUB/$1/${2%/*}"
+	printf '%s\trefs/heads/main\n' "$(git rev-parse HEAD)" >"$STUB_GITHUB/$1/$2"
+}
+
+published() {
+	git update-ref refs/remotes/origin/main HEAD
+	on_github public alice/site
+}
+
 fresh() {
 	cd "$tmp" || exit 1
-	rm -rf "$tmp/repo"
+	rm -rf "$tmp/repo" "$STUB_GITHUB"
 	git init -q "$tmp/repo"
 	cd "$tmp/repo" || exit 1
 	echo hello >README
 	git add README
 	git commit -qm first
 	git remote add origin "$public"
-	git update-ref refs/remotes/origin/main HEAD
+	published
 }
 
 commit_file() { # <file> <line>
@@ -116,7 +132,7 @@ fresh; commit_file a.txt 'said alice-only-word here'
 expect "term for another identity" $clean push
 
 fresh; commit_file a.txt secret-host
-git update-ref refs/remotes/origin/main HEAD
+published
 git rm -q a.txt; git commit -qm remove
 expect "removing a leak" $clean push
 
@@ -145,13 +161,14 @@ git commit -qm merge
 expect "line added in a merge commit" $blocked push
 
 fresh; commit_file a.txt secret-host
-git update-ref refs/remotes/origin/main HEAD
+published
 commit_file b.txt fine
 expect "commit already on this remote" $clean push
 
 fresh; commit_file a.txt secret-host
 git update-ref refs/remotes/upstream/main HEAD
 git remote add upstream https://github.com/someone/site.git
+on_github public someone/site
 expect "commit already on a public upstream" $clean push
 
 git remote set-url --push upstream no_push
@@ -162,6 +179,7 @@ STUB_HANG=1 GIT_LEAKGUARD_TIMEOUT=1 expect "a remote that doesn't answer in time
 fresh; commit_file a.txt secret-host
 git update-ref refs/remotes/work/main HEAD
 git remote add work git@github.com:acme/internal.git
+on_github private acme/internal
 expect "commit on an unlisted private remote" $blocked push
 
 git config url.git@github.com:.insteadOf https://github.com/
@@ -173,6 +191,51 @@ git config --unset credential.helper
 git config --global url.git@github.com:.insteadOf https://github.com/
 expect "global config can't make a remote look public" $blocked push
 git config --global --unset url.git@github.com:.insteadOf
+
+fresh; commit_file a.txt secret-host
+git update-ref refs/remotes/origin/main HEAD
+expect "a tracking ref GitHub doesn't back up" $blocked push
+git remote set-url origin https://github.com/alice/new-home.git
+expect "a remote moved to a new public repo" $blocked push https://github.com/alice/new-home.git
+
+fresh; commit_file a.txt secret-host
+git remote set-url origin https://github.com/acme/internal.git
+git remote set-url --push origin https://github.com/alice/public-thing.git
+git update-ref refs/remotes/origin/main HEAD
+on_github private acme/internal
+expect "fetching from private, pushing to public" $blocked push https://github.com/alice/public-thing.git
+
+fresh; commit_file a.txt secret-host
+git update-ref refs/remotes/other/main HEAD
+git remote add other https://github.com/someone/other.git
+expect "another remote's tracking ref GitHub doesn't back up" $blocked push
+
+fresh; commit_file a.txt secret-host
+on_github public someone/site
+expect "already in the repo a URL push goes to" $clean push https://github.com/someone/site.git
+
+fresh; commit_file a.txt secret-host
+old=$(git rev-parse HEAD); commit_file b.txt fine
+expect "the old value of the pushed ref" $clean \
+	bash -c "printf 'refs/local %s refs/heads/main %s\n' $(git rev-parse HEAD) $old | '$guard' --pre-push origin $public"
+
+fresh; commit_file a.txt secret-host; bad=$(git rev-parse HEAD)
+git rm -q a.txt; git commit -q --amend --allow-empty -m clean
+git replace "$bad" "$(git rev-parse HEAD)"; git reset -q --hard "$bad"
+expect "a commit hidden behind git replace" $blocked push
+
+in_sub() { (cd sub && "$guard"); }
+
+fresh; mkdir sub top; : >sub/b.txt; echo secret-host >top/a.txt; git add .; git commit -qm work
+git config diff.relative true
+expect "history scan from a subdirectory with diff.relative" $blocked in_sub
+
+fresh; mkdir sub top; echo secret-host >top/a.txt; git add top
+git tag v1 "$(git write-tree)"; git reset -q; rm -r top
+expect "history scan of a tagged tree from a subdirectory" $blocked in_sub
+
+fresh; git notes add -m 'from secret-host'
+expect "history scan of notes" $blocked "$guard"
 
 fresh; commit_file a.txt secret-host
 git update-ref refs/remotes/mirror/main HEAD
@@ -203,6 +266,7 @@ expect "private repo" $clean push git@github.com:alice/notes.git
 expect "private repo, any case" $clean push https://github.com/ALICE/Notes.git/
 expect "another repo of that owner" $blocked push git@github.com:alice/notes2.git
 expect "https public repo" $blocked push https://github.com/alice/site
+expect "https through www" $blocked push https://www.github.com/alice/site
 expect "not GitHub" $clean push git@gitlab.example:alice/site.git
 expect "local path" $clean push /srv/git/site.git
 expect "file url" $clean push file:///srv/git/site.git
@@ -224,7 +288,7 @@ expect "branch deletion" $clean \
 	bash -c "printf '(delete) %040d refs/heads/old %040d\n' 0 1 | '$guard' --pre-push origin $public"
 
 fresh; commit_file a.txt secret-host
-git update-ref refs/remotes/origin/main HEAD
+published
 expect "history scan sees what's already pushed" $blocked "$guard"
 
 fresh; commit_file a.txt fine
@@ -233,6 +297,13 @@ expect "clean history scan" $clean "$guard"
 fresh; commit_file a.txt fine
 git config --add leak.regex '(unclosed'
 expect "a broken regex blocks the push" $error push
+git config --unset-all leak.regex
+
+regex_blamed() { push "$public" 2>&1 | grep -q 'check leak.regex'; }
+
+fresh; seq 1 50000 >big.txt; git add .; git commit -qm big
+git config --add leak.regex '(unclosed'
+expect "a broken regex gets the blame on a long history" $clean regex_blamed
 git config --unset-all leak.regex
 
 warned() { push "$public" 2>&1 | grep -q 'lowercased first'; }
@@ -291,7 +362,7 @@ git -c advice.nestedTag=false tag -a v1 -m fine inner
 expect "message of a tag inside a tag" $blocked push_ref v1 refs/tags/v1
 
 fresh; echo fine >secret-host.txt; git add .; git commit -qm 'public file'
-git update-ref refs/remotes/origin/main HEAD
+published
 echo more >>secret-host.txt; git commit -qam edit
 expect "editing a file already public under that name" $clean push
 
@@ -339,6 +410,8 @@ git remote set-url origin git@github.com:someone/site.git
 expect "repo owned by someone else" $clean "$whoami" --check
 git remote set-url origin https://github.com/bob/site.git
 expect "owner over https" $blocked "$whoami" --check
+git remote set-url origin https://www.github.com/bob/site.git
+expect "owner over https through www" $blocked "$whoami" --check
 
 fresh; identities
 git remote add upstream git@github.com:bob/site.git
@@ -370,12 +443,18 @@ expect "push of your own commit" $clean push_whoami
 fresh; identities
 GIT_AUTHOR_EMAIL=bob@example.com git commit -q --allow-empty -m x
 expect "push of another identity's author" $blocked push_whoami
-git update-ref refs/remotes/origin/main HEAD
+published
 expect "that commit already on a remote" $clean push_whoami
 
 fresh; identities
 GIT_COMMITTER_EMAIL=bob@example.com git commit -q --allow-empty -m x
 expect "push of another identity's committer" $blocked push_whoami
+
+fresh; identities
+GIT_AUTHOR_EMAIL='' GIT_COMMITTER_EMAIL='' git commit -q --allow-empty -m x
+expect "a commit with no email" $clean push_whoami
+errored() { push_whoami 2>&1 | grep -q 'bad array'; }
+expect "a commit with no email prints no error" $blocked errored
 
 fresh; identities
 expect "branch deletion, identity check" $clean \
@@ -417,6 +496,11 @@ merge_setup
 GIT_AUTHOR_EMAIL=bob@example.com expect "a merge as another identity" $blocked git merge -q --no-edit side
 merge_setup
 expect "a merge as yourself" $clean git merge -q --no-edit side
+
+mkdir "$tmp/lone"; cp -a "$root/hooks" "$tmp/lone"
+skipped() { PATH=$tmp/stubs:$(dirname "$(command -v bash)"):/usr/bin:/bin git commit --allow-empty -m x 2>&1 | grep -q "$1 check is skipped"; }
+fresh; git config core.hooksPath "$tmp/lone/hooks"
+expect "dispatch says when git-whoami is missing" $clean skipped identity
 
 bare=$tmp/bare.git
 fresh; git config core.hooksPath "$root/hooks"
@@ -460,6 +544,7 @@ expect "updateInstead updates the working tree" $clean test -f "$tmp/target/a.tx
 expect "updateInstead leaves nothing staged" $clean git -C "$tmp/target" diff --quiet --cached HEAD
 
 expect "no link slows every ref update" $blocked test -e "$root/hooks/reference-transaction"
+expect "no link slows every index write" $blocked test -e "$root/hooks/post-index-change"
 
 sandbox=$tmp/home
 in_sandbox() {
@@ -495,6 +580,7 @@ expect "uninstall keeps your identities" $clean in_sandbox git config --global i
 
 mkdir -p "$sandbox/.config/git/hooks"
 expect "install won't replace a real directory" $blocked in_sandbox "$root/install.sh"
+expect "a refused install links nothing" $blocked test -L "$sandbox/.local/bin/git-whoami"
 rmdir "$sandbox/.config/git/hooks"
 mkdir "$tmp/dotfiles"; ln -s "$tmp/dotfiles" "$sandbox/.config/git/hooks"
 expect "install won't replace a dotfiles link" $blocked in_sandbox "$root/install.sh"
@@ -503,6 +589,13 @@ rm "$sandbox/.config/git/hooks"
 in_sandbox git config --global core.hooksPath /somewhere/else
 expect "install with another hooks path" $clean in_sandbox "$root/install.sh"
 expect "install keeps that hooks path" $clean test /somewhere/else = "$(hooks_path)"
+
+in_sandbox "$root/install.sh" --uninstall >/dev/null 2>&1
+in_sandbox "$moved/install.sh" >/dev/null 2>&1
+mv "$moved" "$tmp/moved-again"
+expect "uninstall after moving" $clean in_sandbox "$tmp/moved-again/install.sh" --uninstall
+expect "that removes the dangling commands" $blocked test -L "$sandbox/.local/bin/git-whoami"
+expect "that removes the dangling hooks link" $blocked test -L "$sandbox/.config/git/hooks"
 
 : >"$GIT_CONFIG_GLOBAL"
 expect "no terms configured" $clean push

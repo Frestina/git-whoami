@@ -35,7 +35,7 @@ GitHub account. You only need it if you have two or more GitHub accounts.
 - git installed
 - an SSH key for each GitHub account, added to that account on GitHub
   ([GitHub's guide](https://docs.github.com/en/authentication/connecting-to-github-with-ssh))
-- on a Mac only: run `brew install bash` once
+- on a Mac only: run `brew install bash gawk` once
 
 **1. Install it.** Open the Terminal and paste:
 
@@ -75,7 +75,7 @@ account, and tells you what to fix.
 
 ## Requirements
 
-- git 2.13 or newer (for `includeIf`), or 2.31 for `git leakguard`
+- git 2.13 or newer (for `includeIf`), or 2.32 for `git leakguard`
 - bash 4.4 or newer. Linux already has it. macOS ships bash 3.2, so run
   `brew install bash` and make sure Homebrew's `bin` comes first on your `PATH`.
   With an older bash, commits and pushes are blocked once you've configured
@@ -224,16 +224,22 @@ A push is checked for added lines, the names of new files, author and committer
 names and emails, commit and tag messages, and ref names. Terms also search
 binary files. Regexes don't, because a short one matches random bytes.
 
-Commits already on the remote you're pushing to, or on a remote anyone can read,
-aren't checked again, so pushing a fork doesn't re-check its upstream's history.
-To tell, each push asks GitHub about your other GitHub remotes without logging
-in, one `git ls-remote` per remote. A commit that is only on a private remote or
-a local one still counts when you push it somewhere public, and so does one on a
-remote GitHub didn't answer for within 10 seconds.
+Commits GitHub already shows to anyone, in the repo you're pushing to or in
+another of your GitHub remotes, aren't checked again, so pushing a fork doesn't
+re-check its upstream's history. To tell, each push asks GitHub for the branches
+and tags of those repos without logging in, one `git ls-remote` per repo, and
+gives up on a repo after 10 seconds. Your local tracking refs don't count,
+because they can be out of date.
+
+So a commit is checked unless GitHub shows it. That includes one that is only on
+a private remote or a local one, and everything GitHub didn't answer for. If a
+first push to a fork rescans a lot, your clone is behind: run
+`git fetch upstream`.
 
 Only pushes to github.com are checked, and every repo counts as public unless
 `leak.private` names it. A private repo you forgot to list gets blocked rather
-than skipped.
+than skipped. Only GitHub repos can count as public, so a first push of a
+project from somewhere else scans its whole history.
 
 ```
 git leakguard                    check the whole history of this repo
@@ -242,9 +248,10 @@ git leakguard --pre-push REMOTE URL
                                  (what the pre-push hook runs; reads git's stdin)
 ```
 
-Run `git leakguard` before you make a private repo public. Changing a repo's
-visibility involves no push, so no hook sees it. This scan also covers repos
-listed in `leak.private`.
+Run `git fetch --all --tags` and then `git leakguard` before you make a private
+repo public. Changing a repo's visibility involves no push, so no hook sees it.
+The scan only reads what's in your clone, which is why you fetch first. It also
+covers repos listed in `leak.private`.
 
 What it can't catch:
 
@@ -279,8 +286,8 @@ A repo's own copy of these hooks doesn't run, because they have no link here:
 
 - `push-to-checkout`. Just having this hook replaces the update git does for
   `receive.denyCurrentBranch=updateInstead`.
-- `reference-transaction`. Git runs it for every ref update, so a link makes
-  those about 20 times slower in every repo.
+- `reference-transaction` and `post-index-change`. Git runs these for every ref
+  update and index write, so links make those several times slower in every repo.
 - `proc-receive` and the `p4-*` hooks.
 
 ## Limitations
