@@ -7,8 +7,15 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - run: shellcheck --severity=warning bin/git-whoami bin/git-leakguard hooks/dispatch install.sh tests/run
+      - if: runner.os == 'macOS'
+        run: brew install bash
+      - if: runner.os == 'Linux'
+        run: shellcheck --severity=warning bin/git-whoami bin/git-leakguard hooks/dispatch install.sh tests/run
       - run: tests/run

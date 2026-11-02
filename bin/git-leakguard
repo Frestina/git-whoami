@@ -100,14 +100,23 @@ checked_remote() {
 
 # True when anyone can read url_slug. This leaves your config and credentials
 # behind: a url.insteadOf rule or a login would make a private repo look public.
+# No answer in time counts as private, so a stuck network can't hold up a push.
 readable_anonymously() {
+	local asker timer status
 	(
 		cd / || exit 1
 		unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
 		HOME=/nonexistent GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
 			GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
-			git ls-remote "https://github.com/$url_slug.git" HEAD
-	) >/dev/null 2>&1 </dev/null
+			exec git ls-remote "https://github.com/$url_slug.git" HEAD
+	) >/dev/null 2>&1 </dev/null &
+	asker=$!
+	{ sleep "${GIT_LEAKGUARD_TIMEOUT:-10}"; kill "$asker"; } >/dev/null 2>&1 </dev/null &
+	timer=$!
+	wait "$asker" 2>/dev/null
+	status=$?
+	kill "$timer" 2>/dev/null
+	return "$status"
 }
 
 # Prints commits in the form the scanner reads.

@@ -25,6 +25,7 @@ STUB
 cat >"$tmp/stubs/git" <<'STUB'
 #!/usr/bin/env bash
 [ "${1-}" = ls-remote ] || exec "$REAL_GIT" "$@"
+[ -z "${STUB_HANG-}" ] || exec sleep 30
 "$REAL_GIT" config --get-regexp '^(url|credential)\.' >/dev/null 2>&1 && exit 0
 case $2 in https://github.com/someone/*) exit 0 ;; *) exit 128 ;; esac
 STUB
@@ -155,6 +156,8 @@ expect "commit already on a public upstream" $clean push
 
 git remote set-url --push upstream no_push
 expect "public upstream with no_push as its push URL" $clean push
+
+STUB_HANG=1 GIT_LEAKGUARD_TIMEOUT=1 expect "a remote that doesn't answer in time" $blocked push
 
 fresh; commit_file a.txt secret-host
 git update-ref refs/remotes/work/main HEAD
@@ -456,8 +459,8 @@ first=$tmp/first moved=$tmp/moved
 mkdir "$first"; cp -a "$root/bin" "$root/hooks" "$root/install.sh" "$first"
 expect "install won't take over another checkout's links" $blocked in_sandbox "$first/install.sh"
 expect "the other checkout keeps its link" $clean test "$root/bin/git-whoami" = "$(readlink "$sandbox/.local/bin/git-whoami")"
-in_sandbox "$root/install.sh" --uninstall >/dev/null
-in_sandbox "$first/install.sh" >/dev/null
+in_sandbox "$root/install.sh" --uninstall >/dev/null 2>&1
+in_sandbox "$first/install.sh" >/dev/null 2>&1
 mv "$first" "$moved"
 expect "re-link after moving" $clean in_sandbox "$moved/install.sh"
 expect "re-link updates the hooks link" $clean test "$moved/hooks" = "$(readlink "$sandbox/.config/git/hooks")"

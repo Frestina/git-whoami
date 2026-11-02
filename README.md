@@ -228,7 +228,7 @@ aren't checked again, so pushing a fork doesn't re-check its upstream's history.
 To tell, each push asks GitHub about your other GitHub remotes without logging
 in, one `git ls-remote` per remote. A commit that is only on a private remote or
 a local one still counts when you push it somewhere public, and so does one on a
-remote GitHub didn't answer for.
+remote GitHub didn't answer for within 10 seconds.
 
 Only pushes to github.com are checked, and every repo counts as public unless
 `leak.private` names it. A private repo you forgot to list gets blocked rather
