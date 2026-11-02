@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'macOS'
+        run: brew install bash gawk
+      - if: runner.os == 'Linux'
+        run: shellcheck --severity=warning bin/git-whoami bin/git-leakguard hooks/dispatch install.sh tests/run
+      - run: tests/run

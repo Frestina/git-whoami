@@ -23,7 +23,11 @@ set -u
 
 die() { echo "git-whoami: $*" >&2; exit 2; }
 
-[ "${BASH_VERSINFO[0]}" -ge 4 ] || die "needs bash 4 or newer (this is $BASH_VERSION)"
+if ((BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] < 404)); then
+	# With nothing to check, an old bash shouldn't stop a commit.
+	git config --get-regexp '^identity\.' >/dev/null 2>&1 || exit 0
+	die "needs bash 4.4 or newer (this is $BASH_VERSION)"
+fi
 
 git rev-parse --git-dir >/dev/null 2>&1 || die "not in a git repository"
 
@@ -106,6 +110,18 @@ ssh_identity() {
 	echo "$hostname "
 }
 
+# The remote this branch pushes to, picked the way git does. Empty when that
+# isn't one of the repo's remotes.
+push_target() {
+	local branch r
+	branch=$(git symbolic-ref --quiet --short HEAD)
+	r=$({
+		git config "branch.$branch.pushRemote" || git config remote.pushDefault ||
+			git config "branch.$branch.remote" || echo origin
+	} 2>/dev/null)
+	git remote | grep -Fxq -- "$r" && echo "$r"
+}
+
 # Checks one remote URL, appending to problems/notes. Sets line to a summary.
 check_remote() {
 	local name=$1 url=$2 host key_id="" owner_id="" summary=()
@@ -113,7 +129,10 @@ check_remote() {
 	case $url_scheme in
 		ssh)
 			read -r host key_id < <(ssh_identity "$url_host")
-			[ "$(lower "$host")" = github.com ] || { line="not GitHub, skipped"; return; }
+			case $(lower "$host") in
+				github.com|ssh.github.com) ;;
+				*) line="not GitHub, skipped"; return ;;
+			esac
 			if [ -z "$key_id" ]; then
 				problems+=("$name: $url_host uses an SSH key that isn't any identity's sshkey")
 				summary+=("key unknown")
@@ -176,21 +195,31 @@ check_ident COMMITTER; committer=$line
 declare -A remote_lines=()
 if [ $mode = pre-push ]; then
 	check_remote "$push_remote" "$push_url"; remote_lines[$push_remote]=$line
+	declare -A email_ids=()
 	while read -r _ local_sha _ _; do
 		# An all-zero sha is a branch deletion: nothing to check.
 		[ -n "${local_sha:-}" ] && [ -n "${local_sha//0/}" ] || continue
 		while read -r sha ae ce; do
 			[ "$ce" = "$ae" ] && ce=""
 			for e in "$ae" $ce; do
-				id=$(identity_for_email "$e")
+				[ -n "${email_ids[$e]+set}" ] || email_ids[$e]=$(identity_for_email "$e")
+				id=${email_ids[$e]}
 				[ -n "$id" ] && [ "$id" != "$active" ] &&
 					problems+=("commit ${sha:0:9} has $e ($id)")
 			done
 		done < <(git log --format='%H %ae %ce' "$local_sha" --not --remotes 2>/dev/null)
 	done
 else
+	target=$(push_target)
 	while read -r r; do
+		before=${#problems[@]}
 		check_remote "$r" "$(git remote get-url --push "$r")"; remote_lines[$r]=$line
+		# A commit only depends on where this branch goes. Pushing anywhere else
+		# still has to pass pre-push.
+		if [ $mode = check ] && [ -n "$target" ] && [ "$r" != "$target" ]; then
+			notes+=("${problems[@]:before}")
+			problems=("${problems[@]:0:before}")
+		fi
 	done < <(git remote)
 fi
 
@@ -201,6 +230,12 @@ if [ $mode = report ]; then
 	for r in "${!remote_lines[@]}"; do
 		printf '%-10s %s  %s\n' "$r" "$(git remote get-url --push "$r")" "${remote_lines[$r]}"
 	done
+	# A repo with its own core.hooksPath never reaches dispatch.
+	hooks=$(git rev-parse --git-path hooks)
+	case $(readlink -f "$hooks/pre-push" 2>/dev/null) in
+		*/hooks/dispatch) ;;
+		*) notes+=("hooks run from $hooks, so nothing here is checked on commit or push") ;;
+	esac
 fi
 
 if [ $quiet = 0 ]; then

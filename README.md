@@ -76,9 +76,15 @@ account, and tells you what to fix.
 ## Requirements
 
 - git 2.13 or newer (for `includeIf`), or 2.31 for `git leakguard`
-- bash 4 or newer. Linux already has it. macOS ships bash 3.2, so run
+- bash 4.4 or newer. Linux already has it. macOS ships bash 3.2, so run
   `brew install bash` and make sure Homebrew's `bin` comes first on your `PATH`.
+  With an older bash, commits and pushes are blocked once you've configured
+  something to check.
 - OpenSSH, if you push over SSH
+- For `git leakguard`, an awk that handles `{n}` in regexes and NUL bytes. gawk
+  does, and it's used if it's installed. The awk on Ubuntu 24.04 does too. The
+  awk on macOS and the mawk on Ubuntu 22.04 don't, so install gawk there
+  (`brew install gawk` on macOS) or pushes are blocked.
 
 ## Install
 
@@ -203,7 +209,7 @@ repo that could be pushed. Keep your dotfiles private if they hold this file.
 
 ```ini
 [leak]
-	term = my-laptop                     # literal, any case, anywhere in a line
+	term = my-laptop                     # literal, any case (A-Z only), anywhere in a line
 	term = /home/alice/
 	regex = "ghp_[a-z0-9]{36}"           # awk regex, in lowercase: lines are lowercased first
 	private = alice/notes                # owner/repo, pushes to it aren't checked
@@ -218,9 +224,12 @@ A push is checked for added lines, the names of new files, author and committer
 names and emails, commit and tag messages, and ref names. Terms also search
 binary files. Regexes don't, because a short one matches random bytes.
 
-Commits already on a public remote aren't checked again, so pushing a fork
-doesn't re-check its upstream's history. A commit that is only on a private
-remote or a local one still counts when you push it somewhere public.
+Commits already on the remote you're pushing to, or on a remote anyone can read,
+aren't checked again, so pushing a fork doesn't re-check its upstream's history.
+To tell, each push asks GitHub about your other GitHub remotes without logging
+in, one `git ls-remote` per remote. A commit that is only on a private remote or
+a local one still counts when you push it somewhere public, and so does one on a
+remote GitHub didn't answer for within 10 seconds.
 
 Only pushes to github.com are checked, and every repo counts as public unless
 `leak.private` names it. A private repo you forgot to list gets blocked rather
@@ -243,6 +252,8 @@ What it can't catch:
   passes through your hooks. It can carry your email if you haven't turned on
   GitHub's email privacy setting.
 - **Text inside images,** and anything compressed or encoded.
+- **Case in non-English letters.** Terms ignore case for A to Z only, so `Åse`
+  doesn't find `åse`. Add a term for each spelling.
 - **Anything not on your list.** It finds your terms, not secrets in general.
 
 ## How it works
@@ -251,7 +262,9 @@ Every file in `hooks/` except `dispatch` is a symlink to `hooks/dispatch`.
 Because `core.hooksPath` points at this directory, git runs `dispatch` for every
 hook. It:
 
-- runs `git whoami --check` for `pre-commit`
+- runs `git whoami --check` for `pre-commit` and `pre-merge-commit`. This checks
+  your email and the remote the branch pushes to. A problem with any other
+  remote is only a note, so a read-only `upstream` doesn't stop your commits.
 - runs `git whoami --pre-push` for `pre-push`. This checks the remote, plus the
   author and committer of every commit that isn't on any remote yet.
 - runs `git leakguard --pre-push` for `pre-push`
@@ -259,7 +272,16 @@ hook. It:
   `core.hooksPath` would otherwise stop those hooks from running.
 
 Repos that set their own `core.hooksPath`, such as husky or lefthook, don't run
-the global hooks, so they aren't checked.
+the global hooks, so they aren't checked. `git whoami` prints a note in those
+repos.
+
+A repo's own copy of these hooks doesn't run, because they have no link here:
+
+- `push-to-checkout`. Just having this hook replaces the update git does for
+  `receive.denyCurrentBranch=updateInstead`.
+- `reference-transaction`. Git runs it for every ref update, so a link makes
+  those about 20 times slower in every repo.
+- `proc-receive` and the `p4-*` hooks.
 
 ## Limitations
 
@@ -279,7 +301,7 @@ the global hooks, so they aren't checked.
 ~/.local/share/git-whoami/install.sh --uninstall
 ```
 
-This removes the two symlinks, and also `core.hooksPath` if the installer set
+This removes the three symlinks, and also `core.hooksPath` if the installer set
 it. Your `[identity]` sections stay in your git config, and git ignores them.
 
 ## License

@@ -8,7 +8,7 @@ hook=$(basename "$0")
 self=$(readlink -f "$0" 2>/dev/null) || self=$0
 whoami="$(dirname "$self")/../bin/git-whoami"
 [ -x "$whoami" ] || whoami=$(command -v git-whoami) || {
-	case $hook in pre-commit|pre-push)
+	case $hook in pre-commit|pre-merge-commit|pre-push)
 		echo "$hook: git-whoami not found, so the identity check is skipped" >&2 ;;
 	esac
 	whoami=true
@@ -22,7 +22,7 @@ leakguard="$(dirname "$self")/../bin/git-leakguard"
 stdin=""
 
 case $hook in
-	pre-commit)
+	pre-commit|pre-merge-commit)
 		"$whoami" --check || exit 1 ;;
 	pre-push)
 		stdin=$(cat)

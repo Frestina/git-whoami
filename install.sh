@@ -17,8 +17,8 @@ current_hooks_path=$(git config --global core.hooksPath || true)
 
 link() {
 	local src=$1 dst=$2
-	if [ -e "$dst" ] && [ ! -L "$dst" ]; then
-		echo "install: $dst exists and is not a symlink; move it aside first" >&2
+	if [ -e "$dst" ] && { [ ! -L "$dst" ] || [[ $(readlink "$dst") != "$here"/* ]]; }; then
+		echo "install: $dst exists and doesn't link into this checkout; move it aside first" >&2
 		exit 1
 	fi
 	mkdir -p "$(dirname "$dst")"
@@ -47,9 +47,9 @@ if [ "${1-}" = --uninstall ]; then
 fi
 [ $# -eq 0 ] || { echo "usage: $0 [--uninstall]" >&2; exit 2; }
 
-if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
-	echo "install: warning: git-whoami needs bash 4+, but this shell is $BASH_VERSION." >&2
-	echo "         On macOS: brew install bash (it must come first on your PATH)." >&2
+if ((BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] < 404)); then
+	echo "install: warning: git-whoami needs bash 4.4+, but this shell is $BASH_VERSION." >&2
+	echo "         On macOS: brew install bash gawk (bash must come first on your PATH)." >&2
 fi
 
 link "$here/bin/git-whoami" "$bin_dir/git-whoami"
