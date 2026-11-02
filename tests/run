@@ -269,6 +269,27 @@ fresh; blob=$(echo fine | git hash-object -w --stdin)
 git tag v1 "$blob"
 expect "tag on a clean blob" $clean push_ref v1 refs/tags/v1
 
+fresh; mkdir d; echo 'from secret-host' >d/a.txt; git add d
+tree=$(git write-tree); git reset -q; rm -r d
+git tag v1 "$tree"
+expect "lightweight tag on a tree" $blocked push_ref v1 refs/tags/v1
+git tag -a v2 -m tagged "$tree"
+expect "annotated tag on a tree" $blocked push_ref v2 refs/tags/v2
+expect "history scan of a tagged tree" $blocked "$guard"
+
+fresh; mkdir d; : >d/secret-host.txt; git add d
+tree=$(git write-tree); git reset -q; rm -r d
+git tag v1 "$tree"
+expect "file name in a tagged tree" $blocked push_ref v1 refs/tags/v1
+
+fresh; tree=$(git rev-parse 'HEAD^{tree}')
+git tag v1 "$tree"
+expect "tag on a clean tree" $clean push_ref v1 refs/tags/v1
+
+fresh; git tag -a inner -m 'built on secret-host'
+git -c advice.nestedTag=false tag -a v1 -m fine inner
+expect "message of a tag inside a tag" $blocked push_ref v1 refs/tags/v1
+
 fresh; echo fine >secret-host.txt; git add .; git commit -qm 'public file'
 git update-ref refs/remotes/origin/main HEAD
 echo more >>secret-host.txt; git commit -qam edit

@@ -127,19 +127,31 @@ commits() {
 		"$@" || exit 3
 }
 
-# An annotated tag's own text is not part of any commit, and neither is a blob
-# that a tag points at.
-tag_object() {
-	local target
-	if [ "$(git cat-file -t "$1")" = tag ]; then
-		printf '%scommit %s\n' "$mark" "$1"
-		git cat-file -p "$1" || exit 3
-	fi
-	target=$(git rev-parse "$1^{}") || exit 3
-	[ "$(git cat-file -t "$target")" = blob ] || return 0
-	printf '%sblob %s\n' "$mark" "$target"
-	git cat-file blob "$target" || exit 3
+tag_blob() { # <blob> [path]
+	printf '%sblob %s\n' "$mark" "$1"
+	[ -z "${2-}" ] || printf '%s\n' "$2"
+	git cat-file blob "$1" || exit 3
 	echo
+}
+
+# An annotated tag's own text is not part of any commit, and neither is a blob
+# or tree that a tag points at. A tag can also point at another tag.
+tag_object() {
+	local obj=$1 kind path
+	while :; do
+		kind=$(git cat-file -t "$obj") || exit 3
+		[ "$kind" = tag ] || break
+		printf '%scommit %s\n' "$mark" "$obj"
+		git cat-file -p "$obj" || exit 3
+		read -r _ obj < <(git cat-file -p "$obj")
+	done
+	case $kind in
+		blob) tag_blob "$obj" ;;
+		tree)
+			while read -r _ kind obj path; do
+				[ "$kind" = blob ] && tag_blob "$obj" "$path"
+			done < <(git -c core.quotePath=false ls-tree -r "$obj") ;;
+	esac
 }
 
 # A commit on the remote being pushed to, or on a public one, is out already,
