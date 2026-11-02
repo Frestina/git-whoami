@@ -17,8 +17,8 @@ current_hooks_path=$(git config --global core.hooksPath || true)
 
 link() {
 	local src=$1 dst=$2
-	if [ -e "$dst" ] && [ ! -L "$dst" ]; then
-		echo "install: $dst exists and is not a symlink; move it aside first" >&2
+	if [ -e "$dst" ] && { [ ! -L "$dst" ] || [[ $(readlink "$dst") != "$here"/* ]]; }; then
+		echo "install: $dst exists and doesn't link into this checkout; move it aside first" >&2
 		exit 1
 	fi
 	mkdir -p "$(dirname "$dst")"

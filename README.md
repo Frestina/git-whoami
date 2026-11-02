@@ -261,7 +261,9 @@ Every file in `hooks/` except `dispatch` is a symlink to `hooks/dispatch`.
 Because `core.hooksPath` points at this directory, git runs `dispatch` for every
 hook. It:
 
-- runs `git whoami --check` for `pre-commit`
+- runs `git whoami --check` for `pre-commit` and `pre-merge-commit`. This checks
+  your email and the remote the branch pushes to. A problem with any other
+  remote is only a note, so a read-only `upstream` doesn't stop your commits.
 - runs `git whoami --pre-push` for `pre-push`. This checks the remote, plus the
   author and committer of every commit that isn't on any remote yet.
 - runs `git leakguard --pre-push` for `pre-push`
