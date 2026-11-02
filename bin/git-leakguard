@@ -5,7 +5,7 @@
 # repo that could be pushed:
 #
 #   [leak]
-#     term = my-laptop                     # literal, any case, anywhere in a line
+#     term = my-laptop                     # literal, any case (A-Z only), anywhere in a line
 #     regex = "ghp_[a-z0-9]{36}"           # awk regex, matched against the
 #                                          # lowercased line: write it in lowercase
 #     private = alice/notes                # owner/repo, pushes to it aren't checked
@@ -29,7 +29,11 @@ set -u
 
 die() { echo "git-leakguard: $*" >&2; exit 2; }
 
-[ "${BASH_VERSINFO[0]}" -ge 4 ] || die "needs bash 4 or newer (this is $BASH_VERSION)"
+if ((BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] < 404)); then
+	# With nothing to check, an old bash shouldn't stop a push.
+	git config --get-regexp '^leak\.' >/dev/null 2>&1 || exit 0
+	die "needs bash 4.4 or newer (this is $BASH_VERSION)"
+fi
 
 git rev-parse --git-dir >/dev/null 2>&1 || die "not in a git repository"
 
@@ -44,6 +48,9 @@ while [ $# -gt 0 ]; do
 done
 
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# Starts the scanner's marker lines, so that no commit message can imitate one.
+mark=@@@$RANDOM$RANDOM
 
 # One rule per line: "t <term>" or "r <regex>".
 active=$(git config identity.active) || active=""
@@ -105,17 +112,25 @@ readable_anonymously() {
 
 # Prints commits in the form the scanner reads.
 commits() {
-	git -c core.quotePath=false log --format='@@@commit %H%n%an <%ae>%n%cn <%ce>%n%B%n@@@diff' \
+	git -c core.quotePath=false log --format="${mark}commit %H%n%an <%ae>%n%cn <%ce>%n%B%n${mark}diff" \
 		--patch --root --unified=0 --text --no-renames --no-ext-diff --no-textconv \
 		--no-color --src-prefix=a/ --dst-prefix=b/ --diff-merges=first-parent \
 		"$@" || exit 3
 }
 
-# An annotated tag's own text is not part of any commit.
+# An annotated tag's own text is not part of any commit, and neither is a blob
+# that a tag points at.
 tag_object() {
-	[ "$(git cat-file -t "$1")" = tag ] || return 0
-	printf '@@@commit %s\n' "$1"
-	git cat-file -p "$1" || exit 3
+	local target
+	if [ "$(git cat-file -t "$1")" = tag ]; then
+		printf '%scommit %s\n' "$mark" "$1"
+		git cat-file -p "$1" || exit 3
+	fi
+	target=$(git rev-parse "$1^{}") || exit 3
+	[ "$(git cat-file -t "$target")" = blob ] || return 0
+	printf '%sblob %s\n' "$mark" "$target"
+	git cat-file blob "$target" || exit 3
+	echo
 }
 
 # A commit on the remote being pushed to, or on a public one, is out already,
@@ -134,7 +149,7 @@ public_remotes() {
 stream() {
 	local local_sha remote_ref remote_sha obj range public
 	if [ $mode = all ]; then
-		git for-each-ref --format='@@@ref %(refname)' refs/heads refs/tags
+		git for-each-ref --format="${mark}ref %(refname)" refs/heads refs/tags
 		while read -r obj; do
 			tag_object "$obj"
 		done < <(git for-each-ref --format='%(objectname)' refs/tags)
@@ -145,7 +160,7 @@ stream() {
 	while read -r _ local_sha remote_ref remote_sha; do
 		# An all-zero sha is a branch deletion: nothing to check.
 		[ -n "${local_sha:-}" ] && [ -n "${local_sha//0/}" ] || continue
-		printf '@@@ref %s\n' "$remote_ref"
+		printf '%sref %s\n' "$mark" "$remote_ref"
 		tag_object "$local_sha"
 		range=("$local_sha" --not "${public[@]}")
 		[ -n "${remote_sha//0/}" ] && git cat-file -e "$remote_sha" 2>/dev/null &&
@@ -157,6 +172,22 @@ stream() {
 if [ $mode = pre-push ]; then
 	checked_remote "$push_url" || { cat >/dev/null; exit 0; }
 fi
+
+# Older mawk ignores {n} in a regex and can't see past a NUL byte, so it would
+# let a leak through. Better to stop here than to pass a push it didn't check.
+awk=$(command -v gawk) || awk="awk"
+# shellcheck disable=SC2016
+probe='BEGIN { nul = sprintf("%c", 0) } /a{2}/ && index($0, nul) && index($0, "b") { print "ok" }'
+[ "$(printf 'aa\0b\n' | LC_ALL=C "$awk" "$probe" 2>/dev/null)" = ok ] ||
+	die "this awk can miss leaks (it needs {n} in regexes and NUL bytes in lines), so install gawk"
+
+while IFS= read -r rule; do
+	case $rule in r\ *) ;; *) continue ;; esac
+	bare=${rule//\\?/}
+	case ${bare#r } in *[[:upper:]]*)
+		echo "git-leakguard: regex ${rule#r} has uppercase letters, which never match: lines are lowercased first" >&2 ;;
+	esac
+done <<<"$rules"
 
 # shellcheck disable=SC2016
 scan='
@@ -178,13 +209,20 @@ function check(line, where,    i, lc, hit) {
 		if (++found <= 20) printf "  %s %s: %s\n", commit, where, pat[i]
 	}
 }
-/^@@@ref / { commit = "ref"; state = "meta"; check(substr($0, 8), "name"); next }
-/^@@@commit / { commit = substr($2, 1, 9); state = "meta"; binary = 0; next }
-/^@@@diff$/ { state = "diff"; file = ""; next }
+index($0, mark "ref ") == 1 { commit = "ref"; state = "meta"; check(substr($0, length(mark) + 5), "name"); next }
+index($0, mark "commit ") == 1 { commit = substr($2, 1, 9); state = "meta"; binary = 0; next }
+index($0, mark "blob ") == 1 { commit = substr($2, 1, 9); state = "blob"; binary = 0; next }
+$0 == mark "diff" { state = "diff"; file = ""; next }
 state == "meta" { check($0, "message or author"); next }
-/^diff --git / { len = (length($0) - 16) / 2; file = substr($0, length($0) - len + 1); binary = 0; next }
+state == "blob" {
+	if (index($0, nul)) binary = 1
+	check($0, "tagged file")
+	next
+}
+/^diff --git / { len = (length($0) - 16) / 2; file = substr($0, length($0) - len + 1); binary = 0; hunk = 0; next }
 /^new file mode/ { check(file, file); next }
-/^\+/ {
+/^@@ / { hunk = 1; next }
+hunk && /^\+/ {
 	if (index($0, nul)) binary = 1
 	check(substr($0, 2), file)
 }
@@ -194,7 +232,7 @@ END {
 }'
 
 report=$(
-	stream | LC_ALL=C awk "$scan" <(printf '%s\n' "$rules") -
+	stream | LC_ALL=C "$awk" -v mark="$mark" "$scan" <(printf '%s\n' "$rules") -
 	statuses=("${PIPESTATUS[@]}")
 	[ "${statuses[0]}" -eq 0 ] || exit 3
 	exit "${statuses[1]}"

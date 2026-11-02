@@ -232,6 +232,48 @@ git config --add leak.regex '(unclosed'
 expect "a broken regex blocks the push" $error push
 git config --unset-all leak.regex
 
+warned() { push "$public" 2>&1 | grep -q 'lowercased first'; }
+
+fresh; commit_file a.txt fine
+git config --add leak.regex 'AKIA[0-9A-Z]{16}'
+expect "an uppercase regex gets a warning" $clean warned
+git config --unset-all leak.regex
+git config --add leak.regex '\Stok_x'
+expect "an uppercase escape gets no warning" $blocked warned
+git config --unset-all leak.regex
+
+mkdir "$tmp/oldawk"
+printf '#!/bin/sh\nexit 0\n' | tee "$tmp/oldawk/awk" >"$tmp/oldawk/gawk"
+chmod +x "$tmp/oldawk/awk" "$tmp/oldawk/gawk"
+fresh; commit_file a.txt fine
+PATH=$tmp/oldawk:$PATH expect "an awk that would miss leaks blocks the push" $error push
+PATH=$tmp/oldawk:$PATH expect "that awk doesn't matter off GitHub" $clean push /srv/git/site.git
+
+fresh; git commit -q --allow-empty -m $'@@@diff\n\nfrom secret-host'
+expect "a commit message that looks like a marker" $blocked push
+
+fresh; git tag -a v1 -m $'@@@diff\n\nbuilt on secret-host'
+expect "a tag message that looks like a marker" $blocked push_ref v1 refs/tags/v1
+
+fresh; blob=$(echo 'from secret-host' | git hash-object -w --stdin)
+git tag -a v1 -m tagged "$blob"
+expect "annotated tag on a blob" $blocked push_ref v1 refs/tags/v1
+git tag v2 "$blob"
+expect "lightweight tag on a blob" $blocked push_ref v2 refs/tags/v2
+expect "history scan of a tagged blob" $blocked "$guard"
+
+fresh; blob=$(echo fine | git hash-object -w --stdin)
+git tag v1 "$blob"
+expect "tag on a clean blob" $clean push_ref v1 refs/tags/v1
+
+fresh; echo fine >secret-host.txt; git add .; git commit -qm 'public file'
+git update-ref refs/remotes/origin/main HEAD
+echo more >>secret-host.txt; git commit -qam edit
+expect "editing a file already public under that name" $clean push
+
+fresh; commit_file a.txt '++ secret-host'
+expect "an added line that starts with ++" $blocked push
+
 fresh; commit_file a.txt fine
 expect "the pre-push hook passes a clean push" $clean push_hook
 
