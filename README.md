@@ -218,9 +218,12 @@ A push is checked for added lines, the names of new files, author and committer
 names and emails, commit and tag messages, and ref names. Terms also search
 binary files. Regexes don't, because a short one matches random bytes.
 
-Commits already on a public remote aren't checked again, so pushing a fork
-doesn't re-check its upstream's history. A commit that is only on a private
-remote or a local one still counts when you push it somewhere public.
+Commits already on the remote you're pushing to, or on a remote anyone can read,
+aren't checked again, so pushing a fork doesn't re-check its upstream's history.
+To tell, each push asks GitHub about your other GitHub remotes without logging
+in, one `git ls-remote` per remote. A commit that is only on a private remote or
+a local one still counts when you push it somewhere public, and so does one on a
+remote GitHub didn't answer for.
 
 Only pushes to github.com are checked, and every repo counts as public unless
 `leak.private` names it. A private repo you forgot to list gets blocked rather
@@ -259,7 +262,16 @@ hook. It:
   `core.hooksPath` would otherwise stop those hooks from running.
 
 Repos that set their own `core.hooksPath`, such as husky or lefthook, don't run
-the global hooks, so they aren't checked.
+the global hooks, so they aren't checked. `git whoami` prints a note in those
+repos.
+
+A repo's own copy of these hooks doesn't run, because they have no link here:
+
+- `push-to-checkout`. Just having this hook replaces the update git does for
+  `receive.denyCurrentBranch=updateInstead`.
+- `reference-transaction`. Git runs it for every ref update, so a link makes
+  those about 20 times slower in every repo.
+- `proc-receive` and the `p4-*` hooks.
 
 ## Limitations
 
@@ -279,7 +291,7 @@ the global hooks, so they aren't checked.
 ~/.local/share/git-whoami/install.sh --uninstall
 ```
 
-This removes the two symlinks, and also `core.hooksPath` if the installer set
+This removes the three symlinks, and also `core.hooksPath` if the installer set
 it. Your `[identity]` sections stay in your git config, and git ignores them.
 
 ## License

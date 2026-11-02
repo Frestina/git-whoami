@@ -113,7 +113,10 @@ check_remote() {
 	case $url_scheme in
 		ssh)
 			read -r host key_id < <(ssh_identity "$url_host")
-			[ "$(lower "$host")" = github.com ] || { line="not GitHub, skipped"; return; }
+			case $(lower "$host") in
+				github.com|ssh.github.com) ;;
+				*) line="not GitHub, skipped"; return ;;
+			esac
 			if [ -z "$key_id" ]; then
 				problems+=("$name: $url_host uses an SSH key that isn't any identity's sshkey")
 				summary+=("key unknown")
@@ -201,6 +204,12 @@ if [ $mode = report ]; then
 	for r in "${!remote_lines[@]}"; do
 		printf '%-10s %s  %s\n' "$r" "$(git remote get-url --push "$r")" "${remote_lines[$r]}"
 	done
+	# A repo with its own core.hooksPath never reaches dispatch.
+	hooks=$(git rev-parse --git-path hooks)
+	case $(readlink -f "$hooks/pre-push" 2>/dev/null) in
+		*/hooks/dispatch) ;;
+		*) notes+=("hooks run from $hooks, so nothing here is checked on commit or push") ;;
+	esac
 fi
 
 if [ $quiet = 0 ]; then

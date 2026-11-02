@@ -16,7 +16,8 @@
 # and emails, commit and tag messages, and ref names. Terms also search binary
 # files; regexes don't, because a short one matches random bytes. Only pushes to
 # github.com are checked, and every repo counts as public unless leak.private
-# names it. Commits already on a public remote aren't checked again.
+# names it. Commits already on the remote being pushed to, or on one that can be
+# read without logging in, aren't checked again.
 #
 # Usage:
 #   git leakguard                   check the whole history of this repo, including
@@ -32,10 +33,10 @@ die() { echo "git-leakguard: $*" >&2; exit 2; }
 
 git rev-parse --git-dir >/dev/null 2>&1 || die "not in a git repository"
 
-mode=all push_url=""
+mode=all push_remote="" push_url=""
 while [ $# -gt 0 ]; do
 	case $1 in
-		--pre-push) mode=pre-push; push_url=${3-}; shift 2 ;;
+		--pre-push) mode=pre-push; push_remote=${2-}; push_url=${3-}; shift 2 ;;
 		-h|--help) sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$0"; exit 0 ;;
 		*) die "unknown argument: $1" ;;
 	esac
@@ -68,26 +69,44 @@ parse_host() {
 	esac
 }
 
-# True when URL is a GitHub repo that isn't listed as private.
+# True when URL is a GitHub repo that isn't listed as private. Sets url_slug.
 checked_remote() {
-	local url=$1 real slug rest p
+	local url=$1 real="" rest p
 	parse_host "$url"
 	[ -n "$url_host" ] || return 1
-	real=$(ssh -G "$url_host" 2>/dev/null </dev/null | awk '$1 == "hostname" { print $2 }')
-	[ "$(lower "${real:-$url_host}")" = github.com ] || return 1
-	slug=${url%/}; slug=${slug%.git}
-	rest=${slug%/*}
-	slug="${rest##*[:/]}/${slug##*/}"
+	case $url in
+		http://*|https://*) ;;
+		*) real=$(ssh -G "$url_host" 2>/dev/null </dev/null | awk '$1 == "hostname" { print $2 }') ;;
+	esac
+	case $(lower "${real:-$url_host}") in
+		github.com|ssh.github.com) ;;
+		*) return 1 ;;
+	esac
+	url_slug=${url%/}; url_slug=${url_slug%.git}
+	rest=${url_slug%/*}
+	url_slug="${rest##*[:/]}/${url_slug##*/}"
 	while IFS= read -r p; do
-		[ "$(lower "$p")" = "$(lower "$slug")" ] && return 1
+		[ "$(lower "$p")" = "$(lower "$url_slug")" ] && return 1
 	done < <(git config --get-all leak.private)
 	return 0
 }
 
+# True when anyone can read url_slug. This leaves your config and credentials
+# behind: a url.insteadOf rule or a login would make a private repo look public.
+readable_anonymously() {
+	(
+		cd / || exit 1
+		unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+		HOME=/nonexistent GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+			GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
+			git ls-remote "https://github.com/$url_slug.git" HEAD
+	) >/dev/null 2>&1 </dev/null
+}
+
 # Prints commits in the form the scanner reads.
 commits() {
-	git log --format='@@@commit %H%n%an <%ae>%n%cn <%ce>%n%B%n@@@diff' \
-		--patch --unified=0 --text --no-renames --no-ext-diff --no-textconv \
+	git -c core.quotePath=false log --format='@@@commit %H%n%an <%ae>%n%cn <%ce>%n%B%n@@@diff' \
+		--patch --root --unified=0 --text --no-renames --no-ext-diff --no-textconv \
 		--no-color --src-prefix=a/ --dst-prefix=b/ --diff-merges=first-parent \
 		"$@" || exit 3
 }
@@ -99,12 +118,16 @@ tag_object() {
 	git cat-file -p "$1" || exit 3
 }
 
-# A commit on a public remote is out already, such as the history of a fork's
-# upstream. One that is only on a private remote still counts.
+# A commit on the remote being pushed to, or on a public one, is out already,
+# such as the history of a fork's upstream. One that is only on a private remote
+# still counts. Tracking refs come from the fetch URL, so that's the one to judge.
 public_remotes() {
 	local r
 	while read -r r; do
-		checked_remote "$(git remote get-url --push "$r")" && printf '%s\n' "--remotes=$r"
+		if [ "$r" = "$push_remote" ] ||
+			{ checked_remote "$(git remote get-url "$r")" && readable_anonymously; }; then
+			printf '%s\n' "--remotes=$r"
+		fi
 	done < <(git remote)
 }
 
